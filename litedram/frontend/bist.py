@@ -139,6 +139,8 @@ class _LiteDRAMBISTGenerator(Module):
         self.length      = Signal(awidth)
         self.random_data = Signal()
         self.random_addr = Signal()
+        self.pattern_sel = Signal()
+        self.pattern     = Signal(8)
         self.ticks       = Signal(32)
 
         self.run_cascade_in  = Signal(reset=1)
@@ -206,7 +208,13 @@ class _LiteDRAMBISTGenerator(Module):
             raise NotImplementedError
 
         self.comb += dma_sink_addr.eq(self.base[ashift:] + (addr_gen.o & addr_mask))
-        self.comb += dma.sink.data.eq(data_gen.o)
+        self.comb += [
+            If(self.pattern_sel,
+                dma.sink.data.eq(Replicate(self.pattern, dram_port.data_width//len(self.pattern)))
+            ).Else(
+                dma.sink.data.eq(data_gen.o)
+            )
+        ]
 
 
 @ResetInserter()
@@ -316,6 +324,12 @@ class LiteDRAMBISTGenerator(Module, AutoCSR):
 
     ticks : out
         Duration of the generation.
+
+    pattern_sel : in
+        Select data from "pattern"
+
+    pattern : in
+        Data pattern when selected with "pattern_sel"
     """
     def __init__(self, dram_port):
         ashift, awidth = get_ashift_awidth(dram_port)
@@ -325,10 +339,12 @@ class LiteDRAMBISTGenerator(Module, AutoCSR):
         self.base        = CSRStorage(awidth)
         self.end         = CSRStorage(awidth)
         self.length      = CSRStorage(awidth)
-        self.random      = CSRStorage(fields=[
+        self.mode        = CSRStorage(fields=[
             CSRField("data", size=1),
             CSRField("addr", size=1),
+            CSRField("psel", size=1),
         ])
+        self.pattern     = CSRStorage(8)
         self.ticks       = CSRStatus(32)
 
         # # #
@@ -348,6 +364,8 @@ class LiteDRAMBISTGenerator(Module, AutoCSR):
                 ("length", awidth),
                 ("random_data", 1),
                 ("random_addr", 1),
+                ("pattern_sel", 1),
+                ("pattern", 8),
             ]
             status_layout = [
                 ("done",  1),
@@ -366,8 +384,10 @@ class LiteDRAMBISTGenerator(Module, AutoCSR):
                 control_cdc.sink.base.eq(self.base.storage),
                 control_cdc.sink.end.eq(self.end.storage),
                 control_cdc.sink.length.eq(self.length.storage),
-                control_cdc.sink.random_data.eq(self.random.fields.data),
-                control_cdc.sink.random_addr.eq(self.random.fields.addr),
+                control_cdc.sink.random_data.eq(self.mode.fields.data),
+                control_cdc.sink.random_addr.eq(self.mode.fields.addr),
+                control_cdc.sink.pattern_sel.eq(self.mode.fields.psel),
+                control_cdc.sink.pattern.eq(self.pattern.storage),
             ]
             # Control CDC Out
             self.comb += [
@@ -406,8 +426,10 @@ class LiteDRAMBISTGenerator(Module, AutoCSR):
                 core.base.eq(self.base.storage),
                 core.end.eq(self.end.storage),
                 core.length.eq(self.length.storage),
-                core.random_data.eq(self.random.fields.data),
-                core.random_addr.eq(self.random.fields.addr),
+                core.random_data.eq(self.mode.fields.data),
+                core.random_addr.eq(self.mode.fields.addr),
+                core.pattern_sel.eq(self.mode.fields.psel),
+                core.pattern.eq(self.pattern.storage),
                 self.ticks.status.eq(core.ticks)
             ]
 
@@ -424,6 +446,8 @@ class _LiteDRAMBISTChecker(Module, AutoCSR):
         self.length      = Signal(awidth)
         self.random_data = Signal()
         self.random_addr = Signal()
+        self.pattern_sel = Signal()
+        self.pattern     = Signal(8)
         self.ticks       = Signal(32)
         self.errors      = Signal(32)
 
@@ -489,6 +513,14 @@ class _LiteDRAMBISTChecker(Module, AutoCSR):
 
         # Data FSM ---------------------------------------------------------------------------------
         data_counter = Signal(dram_port.address_width, reset_less=True)
+        data_check = Signal(dram_port.data_width)
+        self.comb += [
+            If(self.pattern_sel,
+                data_check.eq(Replicate(self.pattern, dram_port.data_width//len(self.pattern)))
+            ).Else(
+                data_check.eq(data_gen.o[:min(len(data_gen.o), dram_port.data_width)])
+            )
+        ]
 
         data_fsm = FSM(reset_state="IDLE")
         self.submodules += data_fsm
@@ -506,7 +538,7 @@ class _LiteDRAMBISTChecker(Module, AutoCSR):
             If(dma.source.valid,
                 data_gen.ce.eq(1),
                 NextValue(data_counter, data_counter + 1),
-                If(dma.source.data != data_gen.o[:min(len(data_gen.o), dram_port.data_width)],
+                If(dma.source.data != data_check,
                     NextValue(self.errors, self.errors + 1)
                 ),
                 If(data_counter == (self.length[ashift:] - 1),
@@ -661,6 +693,12 @@ class LiteDRAMBISTChecker(Module, AutoCSR):
 
     errors : out
         Number of DRAM words which don't match.
+
+    pattern_sel : in
+        Select data from "pattern"
+
+    pattern : in
+        Data pattern when selected with "pattern_sel"
     """
     def __init__(self, dram_port):
         ashift, awidth = get_ashift_awidth(dram_port)
@@ -670,10 +708,12 @@ class LiteDRAMBISTChecker(Module, AutoCSR):
         self.base        = CSRStorage(awidth)
         self.end         = CSRStorage(awidth)
         self.length      = CSRStorage(awidth)
-        self.random      = CSRStorage(fields=[
+        self.mode        = CSRStorage(fields=[
             CSRField("data", size=1),
             CSRField("addr", size=1),
+            CSRField("psel", size=1),
         ])
+        self.pattern     = CSRStorage(8)
         self.ticks       = CSRStatus(32)
         self.errors      = CSRStatus(32)
 
@@ -694,6 +734,8 @@ class LiteDRAMBISTChecker(Module, AutoCSR):
                 ("length", awidth),
                 ("random_data", 1),
                 ("random_addr", 1),
+                ("pattern_sel", 1),
+                ("pattern", 8),
             ]
             status_layout = [
                 ("done",    1),
@@ -713,8 +755,10 @@ class LiteDRAMBISTChecker(Module, AutoCSR):
                 control_cdc.sink.base.eq(self.base.storage),
                 control_cdc.sink.end.eq(self.end.storage),
                 control_cdc.sink.length.eq(self.length.storage),
-                control_cdc.sink.random_data.eq(self.random.fields.data),
-                control_cdc.sink.random_addr.eq(self.random.fields.addr),
+                control_cdc.sink.random_data.eq(self.mode.fields.data),
+                control_cdc.sink.random_addr.eq(self.mode.fields.addr),
+                control_cdc.sink.pattern_sel.eq(self.mode.fields.psel),
+                control_cdc.sink.pattern.eq(self.pattern.storage),
             ]
             # Control CDC Out
             self.comb += [
@@ -755,8 +799,10 @@ class LiteDRAMBISTChecker(Module, AutoCSR):
                 core.base.eq(self.base.storage),
                 core.end.eq(self.end.storage),
                 core.length.eq(self.length.storage),
-                core.random_data.eq(self.random.fields.data),
-                core.random_addr.eq(self.random.fields.addr),
+                core.random_data.eq(self.mode.fields.data),
+                core.random_addr.eq(self.mode.fields.addr),
+                core.pattern_sel.eq(self.mode.fields.psel),
+                core.pattern.eq(self.pattern.storage),
                 self.ticks.status.eq(core.ticks),
                 self.errors.status.eq(core.errors),
             ]
